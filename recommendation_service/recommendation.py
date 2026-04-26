@@ -329,34 +329,34 @@ def run_recommendation_pipeline(db: Session) -> list:
 
     for _, row in stats_df.iterrows():
         cat_id   = int(row["category_id"])
-        location = str(row["location"]) if row["location"] else "Unknown"
+        location = str(row["top_location"]) if row["top_location"] else "Various"
 
-        # Cache check
+        # Cache check — now keyed by category only
         cached = get_cached(db, cat_id, location)
         if cached:
-            logger.info("Cache hit: category=%s location=%s", cat_id, location)
+            logger.info("Cache hit: category=%s", cat_id)
             results.append(cached)
             continue
 
-        # Get texts for this group
-        mask         = (df["category_id"] == cat_id) & (df["location"] == row["location"])
+        # Get ALL complaints for this category (not filtered by location)
+        mask         = df["category_id"] == cat_id
         group_df     = df[mask]
         keywords     = extract_keywords(group_df["problem"].tolist())
         sample_texts = get_sample_texts(group_df)
 
         # Build prompt
         prompt = RECOMMENDATION_TEMPLATE.format(
-            category_name    = row["category_name"],
-            location         = location,
-            complaint_count  = int(row["complaint_count"]),
-            avg_res_hours    = row["avg_res_hours"],
-            appeal_rate_pct  = row["appeal_rate_pct"],
-            high_priority_pct= row["high_priority_pct"],
-            peak_day         = row["peak_day"],
-            peak_month       = row["peak_month"],
-            keywords         = ", ".join(keywords) if keywords else "N/A",
-            sample_texts     = "\n".join(f"- {t}" for t in sample_texts) if sample_texts else "N/A",
-        )
+        category_name    = row["category_name"],
+        location         = f"Most reported at: {location}",  # location as info only
+        complaint_count  = int(row["complaint_count"]),
+        avg_res_hours    = row["avg_res_hours"],
+        appeal_rate_pct  = row["appeal_rate_pct"],
+        high_priority_pct= row["high_priority_pct"],
+        peak_day         = row["peak_day"],
+        peak_month       = row["peak_month"],
+        keywords         = ", ".join(keywords) if keywords else "N/A",
+        sample_texts     = "\n".join(f"- {t}" for t in sample_texts) if sample_texts else "N/A",
+    )
 
         # Call Groq
         try:
