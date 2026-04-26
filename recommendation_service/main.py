@@ -5,9 +5,15 @@ FastAPI app entry point.
 Run with: uvicorn main:app --reload --port 8000
 """
 
+import os
+
 from fastapi import FastAPI
 from database import create_tables
 from recommendation import router as recommendation_router
+
+from dotenv import load_dotenv
+load_dotenv(dotenv_path="recommendation_service/.env")
+print("KEY LOADED:", os.getenv("GROQ_API_KEY", "NOT FOUND")[:8]) 
 
 app = FastAPI(title="Complaints AI Service")
 

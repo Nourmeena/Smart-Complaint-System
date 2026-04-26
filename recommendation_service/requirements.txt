@@ -2,6 +2,7 @@ fastapi
 uvicorn
 sqlalchemy
 pymysql
+cryptography
 pandas
 scikit-learn
 groq

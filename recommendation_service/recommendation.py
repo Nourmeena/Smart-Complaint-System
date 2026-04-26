@@ -2,19 +2,12 @@
 recommendation.py
 =================
 Full recommendation pipeline + FastAPI endpoints.
+Updated to match actual database schema (Sequelize camelCase columns).
 
-Endpoints defined here:
-  POST /api/chat/recommendations     → run pipeline, return recommendations
-  GET  /api/manager/recommendations  → list stored recommendations (with filters)
-  PATCH /api/manager/recommendations/{id} → mark as implemented or ignored
-
-Pipeline:
-  1. Fetch last 200 complaints from MySQL        (SQLAlchemy)
-  2. Translate any Arabic texts to English       (Groq via translation.py)
-  3. Statistical analysis per group              (Pandas)
-  4. TF-IDF keyword extraction per group         (Scikit-learn)
-  5. Groq LLM → structured recommendation       (Groq SDK)
-  6. Cache in ai_recommendations table           (SQLAlchemy)
+Column name changes from original:
+  created_at  → createdAt
+  resolved_at → resolved_at  (stays snake_case — it's actually resolved_at in schema)
+  student_id  → user_id      (complaints table uses user_id)
 """
 
 import os
@@ -38,16 +31,16 @@ from translation import translate_to_english
 
 load_dotenv()
 
-GROQ_API_KEY  = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL    = "llama3-70b-8192"
-CACHE_HOURS   = int(os.getenv("RECOMMENDATION_CACHE_HOURS", "24"))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL   = "llama-3.1-8b-instant"
+CACHE_HOURS  = int(os.getenv("RECOMMENDATION_CACHE_HOURS", "24"))
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 # ─────────────────────────────────────────────
-# Pydantic schemas (shapes the API response)
+# Pydantic schemas
 # ─────────────────────────────────────────────
 
 class RecommendationOut(BaseModel):
@@ -56,15 +49,15 @@ class RecommendationOut(BaseModel):
     pattern_detected: str
     recommendation:   str
     root_cause:       Optional[str]
-    urgency:          str
+    urgency:          Optional[str]
     estimated_impact: Optional[str]
     location:         Optional[str]
     complaint_count:  Optional[int]
     avg_resolution_h: Optional[int]
     appeal_rate_pct:  Optional[int]
     top_keywords:     Optional[str]
-    status:           str
-    generated_at:     datetime
+    status:           Optional[str]
+    generated_at:     Optional[datetime]
 
     class Config:
         from_attributes = True
@@ -78,6 +71,7 @@ class StatusUpdate(BaseModel):
 # Step 1: Fetch complaints from MySQL
 # ─────────────────────────────────────────────
 
+# Note: complaints uses createdAt (Sequelize) but resolved_at (manual column)
 FETCH_SQL = text("""
     SELECT
         c.id,
@@ -85,7 +79,7 @@ FETCH_SQL = text("""
         c.ai_summary,
         c.priority,
         c.status,
-        c.created_at,
+        c.createdAt,
         c.resolved_at,
         c.location,
         cat.id   AS category_id,
@@ -93,8 +87,8 @@ FETCH_SQL = text("""
         (SELECT COUNT(*) FROM appeals a WHERE a.complaint_id = c.id) AS has_appeal
     FROM complaints c
     JOIN categories cat ON c.category_id = cat.id
-    WHERE c.created_at >= NOW() - INTERVAL 90 DAY
-    ORDER BY c.created_at DESC
+    WHERE c.createdAt >= NOW() - INTERVAL 90 DAY
+    ORDER BY c.createdAt DESC
     LIMIT 200
 """)
 
@@ -102,28 +96,27 @@ FETCH_SQL = text("""
 def fetch_complaints(db: Session) -> pd.DataFrame:
     result = db.execute(FETCH_SQL)
     rows   = result.fetchall()
-    cols   = result.keys()
-    df     = pd.DataFrame(rows, columns=list(cols))
+    cols   = list(result.keys())
+    df     = pd.DataFrame(rows, columns=cols)
 
     if df.empty:
         return df
 
-    # ── Translate Arabic to English before any analysis ──
+    # Translate any Arabic complaints to English before analysis
     df["problem"] = translate_to_english(df["problem"].tolist())
-
     if "ai_summary" in df.columns and df["ai_summary"].notna().any():
         df["ai_summary"] = translate_to_english(df["ai_summary"].fillna("").tolist())
 
-    # ── Derived columns ──────────────────────────────────
+    # Derived columns — use actual column names from schema
     df["resolution_hours"] = (
-        (pd.to_datetime(df["resolved_at"]) - pd.to_datetime(df["created_at"]))
+        (pd.to_datetime(df["resolved_at"]) - pd.to_datetime(df["createdAt"]))
         .dt.total_seconds() / 3600
     ).clip(lower=0)
 
     df["has_appeal"]       = df["has_appeal"].astype(int)
-    df["is_high_priority"] = (df["priority"].astype(int) >= 4).astype(int)
-    df["day_of_week"]      = pd.to_datetime(df["created_at"]).dt.day_name()
-    df["month"]            = pd.to_datetime(df["created_at"]).dt.month_name()
+    df["is_high_priority"] = (pd.to_numeric(df["priority"], errors="coerce").fillna(0) >= 4).astype(int)
+    df["day_of_week"]      = pd.to_datetime(df["createdAt"]).dt.day_name()
+    df["month"]            = pd.to_datetime(df["createdAt"]).dt.month_name()
 
     return df
 
@@ -133,10 +126,6 @@ def fetch_complaints(db: Session) -> pd.DataFrame:
 # ─────────────────────────────────────────────
 
 def compute_statistics(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Groups by (category_id, location) and computes KPIs.
-    Groups with fewer than 3 complaints are dropped — not enough signal.
-    """
     def safe_mode(series):
         m = series.mode()
         return m.iloc[0] if not m.empty else "N/A"
@@ -154,7 +143,7 @@ def compute_statistics(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
-    # Drop groups with too few complaints
+    # Only groups with 3+ complaints have enough signal
     stats = stats[stats["complaint_count"] >= 3].copy()
 
     stats["avg_res_hours"]     = stats["avg_res_hours"].round(1)
@@ -168,36 +157,23 @@ def compute_statistics(df: pd.DataFrame) -> pd.DataFrame:
 # Step 3: TF-IDF keyword extraction
 # ─────────────────────────────────────────────
 
-def extract_keywords(texts: list[str], top_n: int = 8) -> list[str]:
-    """
-    Extracts the most representative keywords from complaint texts using TF-IDF.
-    Uses bigrams (1-2 words) to catch phrases like 'wifi slow' or 'registration error'.
-    Input texts should already be in English (translated by this point).
-    """
+def extract_keywords(texts: list, top_n: int = 8) -> list:
     clean = [str(t).strip() for t in texts if t and str(t).strip()]
     if len(clean) < 2:
         return []
-
     try:
-        vectorizer = TfidfVectorizer(
-            stop_words="english",
-            max_features=100,
-            ngram_range=(1, 2),
-            min_df=1,
-        )
+        vectorizer   = TfidfVectorizer(stop_words="english", max_features=100, ngram_range=(1, 2), min_df=1)
         tfidf_matrix = vectorizer.fit_transform(clean)
         scores       = tfidf_matrix.mean(axis=0).A1
         terms        = vectorizer.get_feature_names_out()
         top_indices  = scores.argsort()[-top_n:][::-1]
         return [terms[i] for i in top_indices]
-
     except Exception as exc:
         logger.warning("TF-IDF failed: %s", exc)
         return []
 
 
-def get_sample_texts(group_df: pd.DataFrame, n: int = 5) -> list[str]:
-    """Returns up to n complaint summaries (falls back to problem text)."""
+def get_sample_texts(group_df: pd.DataFrame, n: int = 5) -> list:
     col = "ai_summary" if group_df["ai_summary"].notna().any() else "problem"
     return group_df[col].dropna().head(n).tolist()
 
@@ -208,13 +184,12 @@ def get_sample_texts(group_df: pd.DataFrame, n: int = 5) -> list[str]:
 
 SYSTEM_PROMPT = (
     "You are an expert complaints analyst for a university student complaints system. "
-    "Your role is to analyze complaint patterns and produce professional, actionable "
-    "recommendations for university management. "
+    "Produce professional, actionable recommendations for university management. "
     "Always respond with ONLY valid JSON — no markdown, no explanation, no preamble."
 )
 
 RECOMMENDATION_TEMPLATE = """
-Analyze the following student complaint pattern data and generate a structured recommendation.
+Analyze the following student complaint pattern and generate a structured recommendation.
 
 === STATISTICAL DATA ===
 Category:              {category_name}
@@ -232,7 +207,7 @@ Peak complaint month:  {peak_month}
 === SAMPLE COMPLAINT SUMMARIES ===
 {sample_texts}
 
-Based on the data above respond ONLY with this JSON:
+Respond ONLY with this JSON:
 {{
   "pattern_detected": "one sentence describing the pattern",
   "root_cause": "one sentence on the likely underlying cause",
@@ -244,7 +219,6 @@ Based on the data above respond ONLY with this JSON:
 
 
 def call_groq(prompt: str) -> dict:
-    """Sends prompt to Groq and parses the JSON response."""
     client   = Groq(api_key=GROQ_API_KEY)
     response = client.chat.completions.create(
         model=GROQ_MODEL,
@@ -255,14 +229,11 @@ def call_groq(prompt: str) -> dict:
         temperature=0.3,
         max_tokens=512,
     )
-
     raw = response.choices[0].message.content.strip()
-
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
-
     return json.loads(raw.strip())
 
 
@@ -271,7 +242,6 @@ def call_groq(prompt: str) -> dict:
 # ─────────────────────────────────────────────
 
 def get_cached(db: Session, category_id: int, location: str) -> Optional[AiRecommendation]:
-    """Returns a fresh cached recommendation if it exists, otherwise None."""
     cutoff = datetime.utcnow() - timedelta(hours=CACHE_HOURS)
     return (
         db.query(AiRecommendation)
@@ -285,15 +255,7 @@ def get_cached(db: Session, category_id: int, location: str) -> Optional[AiRecom
     )
 
 
-def save_recommendation(
-    db: Session,
-    category_id: int,
-    location: str,
-    stats: dict,
-    groq_result: dict,
-    keywords: list[str],
-) -> AiRecommendation:
-    """Saves the recommendation to the database and returns the ORM object."""
+def save_recommendation(db, category_id, location, stats, groq_result, keywords):
     rec = AiRecommendation(
         category_id      = category_id,
         location         = location,
@@ -316,20 +278,10 @@ def save_recommendation(
 
 
 # ─────────────────────────────────────────────
-# Main pipeline orchestrator
+# Main pipeline
 # ─────────────────────────────────────────────
 
-def run_recommendation_pipeline(db: Session) -> list[AiRecommendation]:
-    """
-    Runs the full pipeline and returns all recommendations (new + cached).
-
-    Flow per (category, location) group:
-      1. Check cache → return if fresh
-      2. Extract keywords with TF-IDF
-      3. Build Groq prompt with stats + keywords + sample texts
-      4. Call Groq → parse JSON
-      5. Save to database
-    """
+def run_recommendation_pipeline(db: Session) -> list:
     logger.info("Starting recommendation pipeline...")
 
     df = fetch_complaints(db)
@@ -348,20 +300,20 @@ def run_recommendation_pipeline(db: Session) -> list[AiRecommendation]:
         cat_id   = int(row["category_id"])
         location = str(row["location"]) if row["location"] else "Unknown"
 
-        # ── Cache check ──────────────────────────────────
+        # Cache check
         cached = get_cached(db, cat_id, location)
         if cached:
             logger.info("Cache hit: category=%s location=%s", cat_id, location)
             results.append(cached)
             continue
 
-        # ── Get texts for this group ─────────────────────
+        # Get texts for this group
         mask         = (df["category_id"] == cat_id) & (df["location"] == row["location"])
         group_df     = df[mask]
         keywords     = extract_keywords(group_df["problem"].tolist())
         sample_texts = get_sample_texts(group_df)
 
-        # ── Build Groq prompt ────────────────────────────
+        # Build prompt
         prompt = RECOMMENDATION_TEMPLATE.format(
             category_name    = row["category_name"],
             location         = location,
@@ -375,7 +327,7 @@ def run_recommendation_pipeline(db: Session) -> list[AiRecommendation]:
             sample_texts     = "\n".join(f"- {t}" for t in sample_texts) if sample_texts else "N/A",
         )
 
-        # ── Call Groq ────────────────────────────────────
+        # Call Groq
         try:
             groq_result = call_groq(prompt)
             logger.info("Groq responded for category=%s location=%s", cat_id, location)
@@ -383,7 +335,6 @@ def run_recommendation_pipeline(db: Session) -> list[AiRecommendation]:
             logger.error("Groq failed for cat=%s loc=%s: %s", cat_id, location, exc)
             continue
 
-        # ── Save ─────────────────────────────────────────
         rec = save_recommendation(db, cat_id, location, row.to_dict(), groq_result, keywords)
         results.append(rec)
 
@@ -397,10 +348,6 @@ def run_recommendation_pipeline(db: Session) -> list[AiRecommendation]:
 
 @router.post("/api/chat/recommendations", response_model=list[RecommendationOut])
 def generate_recommendations(db: Session = Depends(get_db)):
-    """
-    Called by Node.js (Person 5) to trigger the full pipeline.
-    Returns all recommendations — new ones and cached ones.
-    """
     try:
         return run_recommendation_pipeline(db)
     except Exception as exc:
@@ -414,10 +361,6 @@ def list_recommendations(
     category_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
-    """
-    Returns stored recommendations with optional filters.
-    Query params: ?status=pending  or  ?category_id=3
-    """
     query = db.query(AiRecommendation)
     if status:
         query = query.filter(AiRecommendation.status == status)
@@ -428,10 +371,6 @@ def list_recommendations(
 
 @router.patch("/api/manager/recommendations/{rec_id}", response_model=RecommendationOut)
 def update_status(rec_id: int, body: StatusUpdate, db: Session = Depends(get_db)):
-    """
-    Marks a recommendation as implemented or ignored.
-    Node.js also calls this and handles writing the audit_log entry.
-    """
     allowed = {"implemented", "ignored"}
     if body.status not in allowed:
         raise HTTPException(status_code=400, detail=f"status must be one of: {allowed}")
