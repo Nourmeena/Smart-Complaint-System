@@ -87,7 +87,7 @@ FETCH_SQL = text("""
         (SELECT COUNT(*) FROM appeals a WHERE a.complaint_id = c.id) AS has_appeal
     FROM complaints c
     JOIN categories cat ON c.category_id = cat.id
-    WHERE c.createdAt >= NOW() - INTERVAL 90 DAY
+    WHERE c.createdAt >= NOW() - INTERVAL 180 DAY
     ORDER BY c.createdAt DESC
     LIMIT 200
 """)
@@ -131,7 +131,7 @@ def compute_statistics(df: pd.DataFrame) -> pd.DataFrame:
         return m.iloc[0] if not m.empty else "N/A"
 
     stats = (
-        df.groupby(["category_id", "category_name", "location"])
+        df.groupby(["category_id", "category_name"])  # removed location from grouping
         .agg(
             complaint_count    = ("id",                "count"),
             avg_res_hours      = ("resolution_hours",  "mean"),
@@ -139,12 +139,12 @@ def compute_statistics(df: pd.DataFrame) -> pd.DataFrame:
             high_priority_rate = ("is_high_priority",  "mean"),
             peak_day           = ("day_of_week",       safe_mode),
             peak_month         = ("month",             safe_mode),
+            top_location       = ("location",          safe_mode),  # most common location as info only
         )
         .reset_index()
     )
 
-    # Only groups with 3+ complaints have enough signal
-    stats = stats[stats["complaint_count"] >= 3].copy()
+    stats = stats[stats["complaint_count"] >= 5].copy()
 
     stats["avg_res_hours"]     = stats["avg_res_hours"].round(1)
     stats["appeal_rate_pct"]   = (stats["appeal_rate"]        * 100).round(1)
@@ -162,12 +162,34 @@ def extract_keywords(texts: list, top_n: int = 8) -> list:
     if len(clean) < 2:
         return []
     try:
-        vectorizer   = TfidfVectorizer(stop_words="english", max_features=100, ngram_range=(1, 2), min_df=1)
+        vectorizer   = TfidfVectorizer(
+            stop_words="english",
+            max_features=100,
+            ngram_range=(1, 2),
+            min_df=1,
+        )
         tfidf_matrix = vectorizer.fit_transform(clean)
         scores       = tfidf_matrix.mean(axis=0).A1
         terms        = vectorizer.get_feature_names_out()
-        top_indices  = scores.argsort()[-top_n:][::-1]
-        return [terms[i] for i in top_indices]
+        top_indices  = scores.argsort()[-top_n * 2:][::-1]  # get double, then filter
+
+        # Remove redundant phrases — skip a phrase if all its words
+        # already exist in a higher-ranked keyword
+        seen_words = set()
+        final_keywords = []
+        for i in top_indices:
+            term = terms[i]
+            term_words = set(term.split())
+            # skip if this term adds no new words
+            if term_words.issubset(seen_words):
+                continue
+            final_keywords.append(term)
+            seen_words.update(term_words)
+            if len(final_keywords) == top_n:
+                break
+
+        return final_keywords
+
     except Exception as exc:
         logger.warning("TF-IDF failed: %s", exc)
         return []
@@ -189,9 +211,11 @@ SYSTEM_PROMPT = (
 )
 
 RECOMMENDATION_TEMPLATE = """
-Analyze the following student complaint pattern and generate a structured recommendation.
+You are analyzing student complaints for a university management system.
+Below is structured data about a recurring complaint pattern.
+Your job is to identify the root cause and write ONE clear, actionable recommendation.
 
-=== STATISTICAL DATA ===
+=== PATTERN DATA ===
 Category:              {category_name}
 Location:              {location}
 Total complaints:      {complaint_count} (last 90 days)
@@ -201,19 +225,26 @@ High-priority rate:    {high_priority_pct}%
 Peak complaint day:    {peak_day}
 Peak complaint month:  {peak_month}
 
-=== TOP RECURRING KEYWORDS (TF-IDF) ===
+=== RECURRING THEMES (extracted keywords) ===
 {keywords}
 
-=== SAMPLE COMPLAINT SUMMARIES ===
+=== SAMPLE COMPLAINTS ===
 {sample_texts}
 
-Respond ONLY with this JSON:
+=== INSTRUCTIONS ===
+- pattern_detected: one sentence describing what pattern you see in the data
+- root_cause: one sentence on the most likely underlying reason
+- recommendation: one specific action management should take (be concrete, not generic)
+- urgency: high if appeal_rate > 20% or high_priority_rate > 40%, otherwise medium or low
+- estimated_impact: one sentence on the expected outcome if the recommendation is followed
+
+Respond ONLY with this JSON, no extra text:
 {{
-  "pattern_detected": "one sentence describing the pattern",
-  "root_cause": "one sentence on the likely underlying cause",
-  "recommendation": "one specific actionable step for management",
+  "pattern_detected": "...",
+  "root_cause": "...",
+  "recommendation": "...",
   "urgency": "high or medium or low",
-  "estimated_impact": "expected outcome if recommendation is applied"
+  "estimated_impact": "..."
 }}
 """
 
@@ -286,7 +317,7 @@ def run_recommendation_pipeline(db: Session) -> list:
 
     df = fetch_complaints(db)
     if df.empty:
-        logger.warning("No complaints found in the last 90 days.")
+        logger.warning("No complaints found in the last 180 days.")
         return []
 
     stats_df = compute_statistics(df)
