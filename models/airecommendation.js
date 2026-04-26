@@ -10,8 +10,8 @@ module.exports = (sequelize, DataTypes) => {
      * The `models/index` file will call this method automatically.
      */
     static associate(models) {
-     AiRecommendation.belongsTo(Category)
-    }
+  AiRecommendation.belongsTo(models.Category, { foreignKey: "category_id" }); // ✅ كدة صح
+}
   }
   AiRecommendation.init({
     category_id: DataTypes.INTEGER,

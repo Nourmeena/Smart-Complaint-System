@@ -14,8 +14,10 @@ module.exports = (sequelize, DataTypes) => {
     Category.belongsTo(models.Faculty, { foreignKey: "faculty_id" });
 
     Category.hasMany(models.Complaint, { foreignKey: "category_id" });
-    Category.hasMany(models.CategoryKeyword, { foreignKey: "category_id" });
-    Category.hasMany(models.PriorityRule, { foreignKey: "category_id" });
+    
+    Category.hasMany(models.CategoryKeywords, { foreignKey: "category_id" }); // ضفنا s
+    Category.hasMany(models.PriorityRules, { foreignKey: "category_id" });   // ضفنا s
+    
     Category.hasMany(models.AiRecommendation, { foreignKey: "category_id" });
     Category.hasMany(models.AnalysisReport, { foreignKey: "category_id" });
 
@@ -35,6 +37,8 @@ module.exports = (sequelize, DataTypes) => {
   }, {
     sequelize,
     modelName: 'Category',
+    timestamps: true,   // ✅ رجعيها true عشان السيكولايز يبعت الوقت
+    underscored: false  // ✅ خليها false عشان يبعتها بالصيغة اللي الداتا بيز عوزاها (createdAt)
   });
   return Category;
 };

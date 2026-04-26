@@ -10,9 +10,9 @@ module.exports = (sequelize, DataTypes) => {
      * The `models/index` file will call this method automatically.
      */
     static associate(models) {
-    PriorityRules.belongsTo(Category)
-    PriorityRules.belongsTo(User)
-    }
+  PriorityRules.belongsTo(models.Category, { foreignKey: "category_id" }); // ✅ صح
+  PriorityRules.belongsTo(models.User, { foreignKey: "created_by" });      // ✅ صح
+}
   }
   PriorityRules.init({
     priority_level: DataTypes.INTEGER,
@@ -20,10 +20,12 @@ module.exports = (sequelize, DataTypes) => {
     examples: DataTypes.STRING,
     category_id: DataTypes.INTEGER,
     created_by: DataTypes.INTEGER,
-    updated_at: DataTypes.DATE
+    //updated_at: DataTypes.DATE
   }, {
     sequelize,
     modelName: 'PriorityRules',
+    tableName: 'PriorityRules',
+    timestamps: false
   });
   return PriorityRules;
 };

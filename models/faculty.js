@@ -21,8 +21,8 @@ module.exports = (sequelize, DataTypes) => {
   }, {
     sequelize,
     modelName: 'Faculty',
-    timestamps: true,
-    underscored: true
+    timestamps: true,   // ✅ رجعيها true عشان السيكولايز يبعت الوقت
+    underscored: false  // ✅ خليها false عشان يبعتها بالصيغة اللي الداتا بيز عوزاها (createdAt)
   });
 
   return Faculty;

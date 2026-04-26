@@ -23,6 +23,8 @@ module.exports = (sequelize, DataTypes) => {
   }, {
     sequelize,
     modelName: 'ComplaintHistory',
+    timestamps: true,   // ✅ خليها true هنا كمان
+    underscored: false
   });
   return ComplaintHistory;
 };

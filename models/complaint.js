@@ -34,6 +34,8 @@ module.exports = (sequelize, DataTypes) => {
   }, {
     sequelize,
     modelName: 'Complaint',
+    timestamps: true,   // ✅ لازم تكون true عشان يبعت التاريخ
+    underscored: false  // ✅ عشان يبعتها بـ اسم createdAt مش created_at
   });
   return Complaint;
 };

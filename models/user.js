@@ -32,11 +32,13 @@ module.exports = (sequelize, DataTypes) => {
     full_name: DataTypes.STRING,
     email: DataTypes.STRING,
     password_hash: DataTypes.STRING,
-    role: DataTypes.ENUM,
+    role: DataTypes.ENUM('student', 'officer', 'admin'),
     is_active: DataTypes.BOOLEAN
   }, {
     sequelize,
     modelName: 'User',
+    timestamps: true,   // ✅ رجعيها true عشان السيكولايز يبعت الوقت
+    underscored: false  // ✅ خليها false عشان يبعتها بالصيغة اللي الداتا بيز عوزاها (createdAt)
   });
   return User;
 };

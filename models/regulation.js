@@ -10,8 +10,7 @@ module.exports = (sequelize, DataTypes) => {
      * The `models/index` file will call this method automatically.
      */
     static associate(models) {
-      Regulation.belongsTo(Faculty)
-      Regulation.belongsTo(User)
+      Regulation.belongsTo(models.Faculty, { foreignKey: "faculty_id" }); // 
     }
   }
   Regulation.init({
