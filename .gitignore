@@ -9,4 +9,8 @@ backend-nodeJS/node_modules/
 
 # Environment files
 backend-ai/.env
-backend-nodeJS/.env
+backend-nodeJS/.env/backend-nodeJS/node_modules/
+/backend-nodeJS/.env
+/backend-ai/.env
+/backend-ai/venv/
+/frontend-react/.env
