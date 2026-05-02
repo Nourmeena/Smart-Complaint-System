@@ -1,0 +1,12 @@
+# Python
+backend-ai/venv/
+backend-ai/__pycache__/
+backend-ai/**/__pycache__/
+*.pyc
+
+# Node
+backend-nodeJS/node_modules/
+
+# Environment files
+backend-ai/.env
+backend-nodeJS/.env
